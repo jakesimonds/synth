@@ -17,7 +17,7 @@ const int POT4_PIN = 32;
 const int SEQ_PIN = 33; // SEQUENCER IN NOT POT
 const int BUTTON_PIN = 4;
 
-const int DAC_PIN = 25; // MAKES THE NOISE!!!
+const int DAC_PIN = 25;
 const int WAVE_PINS[] = {23, 22, 18}; // input?
 const int WAVE_PIN_RED = 19; // output?
 
@@ -101,27 +101,11 @@ const char* getStateName(State state) {
     }
 }
 
+
 void changeState(State newState) {
-    // Clean up existing state
-    if (droneParams != nullptr) {
-        droneParams->shouldStop = true;
-        delay(50);  // Give thread time to clean up
-        delete droneParams;
-        droneParams = nullptr;
-    }
-
-    // Initialize new state if needed
-    if (newState == State::KEYLOCK || newState == State::SEQUENCER) {
-        droneParams = new DroneParams();
-        droneParams->isPlaying = true;
-        std::thread droneThread(drone_note, droneParams);
-        droneThread.detach();
-    }
-
     currentState = newState;
     Serial.printf("State changed to: %s\n", getStateName(currentState));
 }
-
 
 void playNote(char* noteName, WaveType waveType = WaveType::SQUARE, int durationMs = 500, uint8_t toneShift = 0) {
     static const std::map<std::string, float> noteToFreq = {
@@ -247,7 +231,6 @@ char* identifyNoteFromKeys(KeyPosition activeKeys[], int keyCount) {
 }
 
 
-
 const char* getWaveTypeName(WaveType wave) {
     switch(wave) {
         case WaveType::SQUARE:
@@ -278,6 +261,7 @@ void drone_note(DroneParams* params) {
     const float TWO_PI_ = 6.28318530718;
     const int SAMPLES_PER_PERIOD = 100;
     unsigned long startTime = millis();  // Track time for LFO
+    bool prevCycle = false;
     
     while (!params->shouldStop) {
         vTaskDelay(1);  // Critical for watchdog
@@ -305,6 +289,13 @@ void drone_note(DroneParams* params) {
         float lfoPhase = TWO_PI_ * ((currentTime - startTime) % lfoRate) / lfoRate;
         float lfoValue = (sin(lfoPhase) + 1.0) / 2.0;  // Smooth 0 to 1
 
+        bool currentCycle = lfoPhase < PI;  // First half of cycle
+        if (currentCycle != prevCycle) {  // Transition detected
+            REDBOOLEAN = !REDBOOLEAN;
+            digitalWrite(RED_LED_PIN, REDBOOLEAN ? HIGH : LOW);
+            prevCycle = currentCycle;
+        }
+
         // Triangle LFO waveform
         //float lfoValue;
         // if (lfoValue < 0.5) {
@@ -319,7 +310,7 @@ void drone_note(DroneParams* params) {
         // Apply tone shift modulation
         //float shiftAmount = toneShiftAmount * lfoValue;  // Modulate by LFO
         //float currentFreq = baseFreq + shiftAmount;
-        Serial.printf("freq: %f \n", currentFreq);
+        //Serial.printf("freqqqq: %f \n", currentFreq);
         
         // Generate one cycle of the waveform
         for (int i = 0; i < SAMPLES_PER_PERIOD; i++) {
@@ -356,118 +347,55 @@ void drone_note(DroneParams* params) {
 
 
 
-void handleKeyboardState(int mappedPot1, int mappedPot2, int mappedPot3, int mappedPot4, int mappedSeqVal, WaveType currentWave, bool buttonState) {
+float getFrequencyFromKeys() {
+    // Static map of note to frequency
+    Serial.print(" INSIDE getFREQ \n");
+    static const std::map<std::string, float> noteToFreq = {
+        {"C",  261.63}, {"C#", 277.18},
+        {"D",  293.66}, {"D#", 311.13},
+        {"E",  329.63},
+        {"F",  349.23}, {"F#", 369.99},
+        {"G",  392.00}, {"G#", 415.30},
+        {"A",  440.00}, {"A#", 466.16},
+        {"B",  493.88}
+    };
 
-    // THESE prints seem to fuck up keyboard?????????
-
-    Serial.printf("seq: %d \n", mappedSeqVal);
-    Serial.printf("pot1: %d \n", mappedPot1);
-    Serial.printf("pot2: %d \n", mappedPot2);
-    Serial.printf("pot3: %d \n", mappedPot3);
-    Serial.printf("pot4: %d \n", mappedPot4);
-    Serial.printf("wave: %d \n", currentWave);
-    Serial.printf("button: %d \n", buttonState);
-    
-    Serial.printf("Handle Keyboard State...\n");
-    
+    // Scan keyboard to get active keys
     KeyPosition activeKeys[NUM_ROWS * NUM_COLS];
-    int keyCount = 0; // Tracks the number of active keys
+    int keyCount = 0;
 
     // Scan through each column
     for (int col = 0; col < NUM_COLS; col++) {
-        // Set current column HIGH
         digitalWrite(COL_PINS[col], HIGH);
-        delayMicroseconds(50);
+        delayMicroseconds(100);
 
         // Check all rows for this column
         for (int row = 0; row < NUM_ROWS; row++) {
             if (digitalRead(ROW_PINS[row]) == HIGH) {
-                // Store row, col position as active
                 activeKeys[keyCount++] = { row, col };
-                Serial.printf("REGISTERED! keyCount = %d, row: %d col: %d \n", keyCount, row, col);
             }
         }
 
-        // Set column back to LOW before moving to next
         digitalWrite(COL_PINS[col], LOW);
         delayMicroseconds(50);
     }
-    //KeyPosition activeKeys = readKeyboard(); // ASPIRATIONAL--for now stuck on exposing keyCount
-
 
     // Identify the note from active keys
-    //char* note = identifyNoteFromKeys(activeKeys, keyCount);
-    PREV_NOTE = identifyNoteFromKeys(activeKeys, keyCount);
-    if (PREV_NOTE != NULL) {
-        // Instead of returning the note directly, copy it to PREV_NOTE
+    const char* currentNote = identifyNoteFromKeys(activeKeys, keyCount);
+    Serial.printf("%s \n", currentNote);
+
+    // If a note is pressed, find and return its frequency
+    if (currentNote != NULL) {
+        auto it = noteToFreq.find(currentNote);
         
-    Serial.print("Note presseeeeed: ");
-    Serial.println(PREV_NOTE);
-    if (REDBOOLEAN){
-    digitalWrite(RED_LED_PIN, LOW);
-    }
-    else {
-      digitalWrite(RED_LED_PIN, HIGH);
+        if (it != noteToFreq.end()) {
+            return it->second;
+        }
     }
 
-    REDBOOLEAN = !REDBOOLEAN;
-
-    playNote(PREV_NOTE, currentWave, mappedPot1, mappedPot2); // mappedPot1 = duration (LFO), mappedPot2 = pitchbend 
-
-} else {
-    // No note pressed, ensure OUTPUT_PIN is LOW
-    digitalWrite(RED_LED_PIN, LOW);
-}
-Serial.print("END OF HAnDLE KEYBOARD...");
-return;
+    return 0.0;  // Return 0 Hz when no note is pressed
 }
 
-
-
-
-void handleKeylockState(int mappedPot1, int mappedPot2, int mappedPot3, int mappedPot4, int mappedSeqVal, WaveType currentWave, bool buttonState) {
-    Serial.printf("Handle Keylock State...\n");
- 
-    // Create drone parameters if not exists
-    if (droneParams == nullptr) {
-        droneParams = new DroneParams();
-        droneParams->isPlaying = true;
-        std::thread droneThread(drone_note, droneParams);
-        droneThread.detach();
-    }
-
-    // Update parameters thread-safely
-    {
-        std::lock_guard<std::mutex> lock(droneParams->paramMutex);
-        droneParams->waveType = currentWave;
-        droneParams->durationMs = mappedPot1;
-        droneParams->toneShift = mappedPot2;
-        // In Keylock state, frequency comes from POT4
-        droneParams->frequency = map(mappedPot3, 0, 255, 220.0, 880.0); // Map POT4 to frequency range
-    }
-}
-
-void handleSequencerState(int mappedPot1, int mappedPot2, int mappedPot3, int mappedPot4, int mappedSeqVal, WaveType currentWave, bool buttonState) {
-    Serial.printf("Handle Sequencer State...\n");
-
-    // Create drone parameters if not exists
-    if (droneParams == nullptr) {
-        droneParams = new DroneParams();
-        droneParams->isPlaying = true;
-        std::thread droneThread(drone_note, droneParams);
-        droneThread.detach();
-    }
-
-    // Update parameters thread-safely
-    {
-        std::lock_guard<std::mutex> lock(droneParams->paramMutex);
-        droneParams->waveType = currentWave;
-        droneParams->durationMs = mappedPot1;
-        droneParams->toneShift = mappedPot2;
-        // In Sequencer state, frequency comes from SEQ_VAL
-        droneParams->frequency = map(mappedSeqVal, 0, 4095, 220.0, 880.0); // Map SEQ_VAL to frequency range
-    }
-}
 
 
 
@@ -517,6 +445,13 @@ void setup() {
 
     pinMode(WAVE_PIN_RED, OUTPUT);
     digitalWrite(WAVE_PIN_RED, LOW);
+
+    State newState = State::SEQUENCER;
+
+    droneParams = new DroneParams();
+    droneParams->isPlaying = true;
+    std::thread droneThread(drone_note, droneParams);
+    droneThread.detach();
 
 
 }
@@ -576,11 +511,27 @@ void loop() {
             droneParams->toneShift = map(pot2Val, 0, 4095, 0, 1000);
             droneParams->highFilter = map(pot4Val, 0, 4095, 0, HIGH_FILTER);
 
-            float newFreq = (currentState == State::KEYLOCK) ?
-                map(pot3Val, 0, 4095, FREQ_RANGE[0], FREQ_RANGE[1]) :
-                map(seqVal, 0, 4095, FREQ_RANGE[0], FREQ_RANGE[1]);
-            
-            droneParams->frequency = newFreq;
+        float newFreq;
+        switch (currentState) {
+            case State::KEYLOCK:
+                newFreq = map(pot3Val, 0, 4095, 12, 6000);
+                //droneParams->frequency = newFreq;
+                break;
+                
+            case State::SEQUENCER:
+                newFreq = map(seqVal, 0, 4095, 12, 6000);
+                //droneParams->frequency = newFreq;
+                break;
+                
+            case State::KEYBOARD:
+                //newFreq = getFrequencyFromKeys(); // TRASH!!!!!
+                newFreq = 261.63;
+
+                //Serial.print(newFreq);
+                break;
+              
+        }
+        droneParams->frequency = newFreq;
         }
 
         lastUpdate = millis();
