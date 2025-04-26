@@ -1,12 +1,29 @@
+/*
+This code is the 'brains' of my digital synth project. It's primary job is to take input from 
+the keyboard (which was reverse-engineered from a children's toy & has some quirks)
+and then make the corresponding sound. 
+
+We also read in various potentiometer values and based off of that adjusts the timing and pitch 
+of the notes as well. See demo video in README.md if you want to see it working. 
+
+Sibling file 'drone.ino' was a more ambitious attempt to use threading to actually emulate LFO and other synth-like
+effects. Never really got it working very well, this code is much simpler and works much better. 
+
+Critical functions: playNote(), identifyNoteFromKeys(), and the Loop(). 
+*/
+
+
 #include <map>
 #include <string>
 
-// constants & pins
-const int ROW_PINS[] = {36, 39, 34, 21};
+
+// ROW-COL stuff is for matrix to scan for keyboard inputs 
+const int ROW_PINS[] = {36, 39, 34, 21}; 
 const int COL_PINS[] = {27, 14, 12};
 const int NUM_ROWS = 4;
 const int NUM_COLS = 3;
-const int DAC_PIN = 25;
+
+const int DAC_PIN = 25; // 
 const int BUTTON_PIN = 4;
 const int RED_LED_PIN = 15;  
 const int POT1_PIN = 26;
@@ -15,24 +32,22 @@ const int POT3_PIN = 35;
 const int POT4_PIN = 32;
 const int SEQ_PIN = 33;
 
-const int WAVE_PINS[] = {23, 22, 18}; 
-const int WAVE_PIN_RED = 19;
+const int WAVE_PINS[] = {23, 22, 18}; // sqare, sine & saw waves implemented
+const int WAVE_PIN_RED = 19; // as in red LED
 
-unsigned long lastDebounceTime = 0;
+unsigned long lastDebounceTime = 0; // for matrix scan of keyboard
 const unsigned long debounceDelay = 200; 
 
 // ------------------------------------------------------------
 // ---------------- STRUCTS & CLASSES -------------------------
 // ------------------------------------------------------------
 
-// Structure to hold row, col pairs
 struct KeyPosition {
     int row;
     int col;
 };
 
 
-// Wave type enum
 enum class WaveType {
     SQUARE,
     SINE,
@@ -47,7 +62,16 @@ WaveType currentWave = WaveType::SQUARE;
 
 
 void playNote(const char* noteName, WaveType waveType = WaveType::SQUARE, int durationMs = 500, uint8_t toneShift = 0, float upDown = 0, float noise = 0, int seqVal = 0) {
-    digitalWrite(RED_LED_PIN, HIGH);
+    /* 
+    We take in a noteName & a bunch of parameter values which have been set by the various potentiometers, and then based off of that we're adjusting the timing 
+    of how we write a value to our output, DAC_PIN. 
+
+    The timing of how we flip on and off the DAC_PIN is how we're changing frequency, adding random noise, etc etc. 
+    */
+    
+    digitalWrite(RED_LED_PIN, HIGH); // helper red LED indicates you're playing a note
+
+    // turn noteName into frequency number
     static const std::map<std::string, float> noteToFreq = {
         {"C",  261.63}, {"C#", 277.18},
         {"D",  293.66}, {"D#", 311.13},
@@ -57,23 +81,22 @@ void playNote(const char* noteName, WaveType waveType = WaveType::SQUARE, int du
         {"A",  440.00}, {"A#", 466.16},
         {"B",  493.88}
     };
-    
-    // Look up the frequency
     auto it = noteToFreq.find(noteName);
     if (it == noteToFreq.end()) {
         Serial.println("Invalid note!");
         return;
     }
-    
+
     float baseFrequency = it->second;
-    const float maxFreqShift = 30.0; // Maximum frequency shift
+    const float maxFreqShift = 30.0;
     const float TWO_PI_ = 6.28318530718;
     const int SAMPLES_PER_PERIOD = 32;
     
-    // Calculate how much to increase frequency per millisecond
+
+    // shift frequency, this will cause, over the course of the note being played, the freq to rise
+    // scaled by toneShift param, which is connected to potentiometer
     float freqShiftPerMs = 0;
     if (toneShift > 0) {
-        // Scale the shift based on toneShift value (0-255)
         float totalShift = (maxFreqShift * toneShift) / 255.0;
         freqShiftPerMs = totalShift / durationMs;
     }
@@ -81,68 +104,63 @@ void playNote(const char* noteName, WaveType waveType = WaveType::SQUARE, int du
     unsigned long startTime = millis();
     int dacValue = 0;
     
-    // Generate waveform until duration is reached
     while(millis() - startTime < durationMs) {
-        // Calculate current frequency based on time elapsed
         unsigned long elapsed = millis() - startTime;
-        float currentFreq = baseFrequency + (freqShiftPerMs * elapsed * upDown);
 
-        //if (durationMs < 200) {
+        // upDown param will cause either frequency to rise or fall over course of note
+        float currentFreq = baseFrequency + (freqShiftPerMs * elapsed * upDown);
         currentFreq = currentFreq + seqVal;
-        //}
-        
-        // Calculate timing based on current frequency
         int period = (int)(1000000.0 / currentFreq);
-        //Serial.printf("period before: %d\n", period);
+        
+        
+        // add random noise scaled by 'noise' param (another potentiometer)
         int randomSeed = random(-3,3);
         int noiseToAdd = randomSeed * noise;
-        //Serial.printf("noise to add: %d\n", noiseToAdd);
         period = period + noiseToAdd;
-
-        //Serial.printf("period after: %d\n", period);
         
         int halfPeriod = period / 2;
         int sampleTime = period / SAMPLES_PER_PERIOD; 
         
         static float phase = 0.0;
         
+
+        // THIS IS WHERE SOUND GENERATION LITERALLY HAPPENS, DAC_WRITE()! 
+        // everything else beforehard is just about setting up how it will happen
         switch(waveType) {
             case WaveType::SQUARE:
-                // Simple square wave with adjusted frequency
-                dacWrite(25, 255);  // HIGH
+                dacWrite(DAC_PIN, 255);  // HIGH
                 delayMicroseconds(halfPeriod);
-                dacWrite(25, 0);    // LOW
+                dacWrite(DAC_PIN, 0);    // LOW
                 delayMicroseconds(halfPeriod);
                 break;
                 
             case WaveType::SINE:
-                // Generate sine wave with adjusted frequency
                 for(int i = 0; i < SAMPLES_PER_PERIOD; i++) {
                     phase = TWO_PI_ * i / SAMPLES_PER_PERIOD;
                     dacValue = (int)(127.5 + 127.5 * sin(phase));
-                    dacWrite(25, dacValue);
+                    dacWrite(DAC_PIN, dacValue);
                     delayMicroseconds(sampleTime);
                 }
                 break;
                 
             case WaveType::SAW:
-                // Generate sawtooth wave with adjusted frequency
                 for(int i = 0; i < SAMPLES_PER_PERIOD; i++) {
                     dacValue = (i * 255) / SAMPLES_PER_PERIOD;
-                    dacWrite(25, dacValue);
+                    dacWrite(DAC_PIN, dacValue);
                     delayMicroseconds(sampleTime);
                 }
                 break;
         }
     }
     
-    // Ensure DAC is off when done
-    dacWrite(25, 0);
+    dacWrite(DAC_PIN, 0);
     digitalWrite(RED_LED_PIN, LOW);
 }
 
 
+
 WaveType getNextWave(WaveType current) {
+// when you press the wave button, it just cycles thru the three wave types
     switch(current) {
         case WaveType::SQUARE:
             return WaveType::SINE;
@@ -168,11 +186,25 @@ const char* getWaveTypeName(WaveType wave) {
     }
 }
 
-// Function to identify the note from active keys
+// 
 const char* identifyNoteFromKeys(KeyPosition activeKeys[], int keyCount) {
+    /*
+    This function runs once per loop(). 
+
+    activeKeys[] I think of as array of pairs of (row, col) values. 
+
+    So each loop we wrote HIGH values along the COL, read back along the ROW, and when we got a HIGH result for 
+    that ROW value we added (row, col) to the activeKeys[] array. 
+
+    Now, we're taking this raw result and mapping it back to a keypress. 
+
+    C and G generate lots of false positives due to wiring things that I don't understand
+    and since it somewhat works I'm not going to take it all apart ¯\_(ツ)_/¯
+    */
+
     bool rowCols[NUM_ROWS][NUM_COLS] = {false};  // Track active columns for each row
 
-    // Populate rowCols based on active keys
+    
     for (int i = 0; i < keyCount; i++) {
         int row = activeKeys[i].row;
         int col = activeKeys[i].col;
@@ -183,7 +215,7 @@ const char* identifyNoteFromKeys(KeyPosition activeKeys[], int keyCount) {
 
     // Identify specific note patterns based on active columns in each row
     if (rowCols[3][0] && rowCols[3][1] && rowCols[3][2]) return "C";
-    //if (rowCols[3][0]) return "C"; // this will make C play, but you get lots of false positves too
+    //if (rowCols[3][0]) return "C"; // 
     if (rowCols[2][0] && rowCols[2][1] && rowCols[2][2]) return "C#";
     if (rowCols[1][0] && rowCols[1][1] && rowCols[1][2]) return "D";
     if (rowCols[0][0] && rowCols[0][1] && rowCols[0][2]) return "D#";
@@ -196,7 +228,7 @@ const char* identifyNoteFromKeys(KeyPosition activeKeys[], int keyCount) {
     if (rowCols[1][2] && !rowCols[1][1] && !rowCols[1][0]) return "A#";
     if (rowCols[0][2] && !rowCols[0][1] && !rowCols[0][0]) return "B";
 
-    return NULL; // No matching note found
+    return NULL;
 }
 
 // ----------------------------------------------------------------------------------------------------------------
@@ -206,7 +238,7 @@ const char* identifyNoteFromKeys(KeyPosition activeKeys[], int keyCount) {
 
 void setup() {
     
-    Serial.begin(115200);
+    Serial.begin(115200); // baud rate
     Serial.println("Starting Piano Matrix Scanner...");
 
     // Set column pins as outputs
@@ -244,11 +276,16 @@ void setup() {
 
 
 void loop() {
+    /* 
+    1: read in all potentiometer values
+    2: do a matrix scan to see if a key is pressed
+    3: if key is pressed, pass along note and potetiometer values to playNote()
+    */
 
     static unsigned long lastUpdate = 0;
     const unsigned long UPDATE_INTERVAL = 50; 
 
-    // Only update parameters periodically
+
     if (millis() - lastUpdate >= UPDATE_INTERVAL) {
         // Read all inputs
         int pot1Val = analogRead(POT1_PIN);
@@ -256,20 +293,6 @@ void loop() {
         int pot3Val = analogRead(POT3_PIN);
         int pot4Val = analogRead(POT4_PIN);
         int seqVal = analogRead(SEQ_PIN);
-        //Serial.printf("duration %d\n", pot1Val);
-        //Serial.printf("pot2 %d\n", pot2Val);
-        //Serial.printf("pot3 %d\n", pot3Val);
-        //Serial.printf("pot4 %d\n", pot4Val);
-        //Serial.printf("seq: %d\n", seqVal);
-
-        // Read wave and button state
-        // digitalWrite(WAVE_PIN_RED, HIGH);
-        // WaveType newWave = getWaveFromStates(
-        //     digitalRead(WAVE_PINS[0]),
-        //     digitalRead(WAVE_PINS[1]),
-        //     digitalRead(WAVE_PINS[2])
-        // );
-        // digitalWrite(WAVE_PIN_RED, LOW);
 
 
     bool buttonState = digitalRead(BUTTON_PIN);
@@ -279,25 +302,19 @@ void loop() {
     lastDebounceTime = millis();  // Reset debounce timer
   }
 
-    // Temporary storage for active keys
     KeyPosition activeKeys[NUM_ROWS * NUM_COLS];
-    int keyCount = 0; // Tracks the number of active keys
+    int keyCount = 0; 
 
-    // Scan through each column
     for (int col = 0; col < NUM_COLS; col++) {
-        // Set current column HIGH
         digitalWrite(COL_PINS[col], HIGH);
         delayMicroseconds(50);
 
-        // Check all rows for this column
         for (int row = 0; row < NUM_ROWS; row++) {
             if (digitalRead(ROW_PINS[row]) == HIGH) {
-                // Store row, col position as active
                 activeKeys[keyCount++] = { row, col };
             }
         }
 
-        // Set column back to LOW before moving to next
         digitalWrite(COL_PINS[col], LOW);
         delayMicroseconds(50);
     }
@@ -307,12 +324,9 @@ void loop() {
 
 
     if (note != NULL) {
-        //Serial.print("Note pressed: ");
-        //Serial.println(note);
         playNote(note, currentWave, map(pot1Val, 0, 4095, 0, 1000), map(pot2Val, 0, 4095, 0, 255), map(pot3Val, 0, 4095, -1, 1), map(pot4Val, 0, 4095, 0, 255), map(seqVal, 0, 4095, 0, 255) ); 
 
     } 
-    // Delay before next scan
     delay(50);
 }
 
