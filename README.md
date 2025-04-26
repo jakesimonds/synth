@@ -7,6 +7,10 @@
 Functionality demo (2 min):
 https://www.youtube.com/watch?v=3Eg-PfTNHv8&t=4s
 
+Longer demo & walk thru(10 minutes):
+https://www.youtube.com/watch?v=Hvd5sonKdWs&t=5s
+
+
 This synthesizer was a project for an Embedded Systems course in grad school. It's an ESP-32 Wrover microcontroller, and I used ArduinoIDE to flash code to it. There's more information in `/SupportingDocs` but briefly:
 
 
